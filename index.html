@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="lo">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ລະບົບເບິ່ງໜ້າຕັດຂວາງແມ່ນ້ຳ</title>
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css?v=5">
+<link rel="stylesheet" href="css/app.css?v=5">
+</head>
+<body>
+<div id="root">
+  <header>
+    <h1 data-i18n="title"></h1>
+    <label for="dataset-select" data-i18n="dataset"></label>
+    <select id="dataset-select"></select>
+    <label for="section-select" data-i18n="section"></label>
+    <select id="section-select"></select>
+    <a id="download-all" href="#" style="display:none" data-i18n="download_all_csv"></a>
+    <a id="download" href="#" style="display:none" data-i18n="download_csv"></a>
+  </header>
+  <main>
+    <div id="map"></div>
+    <div id="panel">
+      <div id="panel-head">
+        <div id="info"></div>
+        <label for="ve-select" data-i18n="vert_exag"></label>
+        <select id="ve-select">
+          <option value="auto" selected data-i18n="auto"></option>
+          <option value="1">1×</option>
+          <option value="2">2×</option>
+          <option value="5">5×</option>
+          <option value="10">10×</option>
+        </select>
+      </div>
+      <div id="chart-wrap">
+        <div id="chart"></div>
+        <div id="chart-prompt"></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="vendor/leaflet/leaflet.js?v=5"></script>
+<script src="vendor/echarts/echarts.min.js?v=5"></script>
+<script type="module" src="js/app.js?v=5"></script>
+</body>
+</html>

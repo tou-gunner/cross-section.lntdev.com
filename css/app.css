@@ -1,0 +1,178 @@
+/* Cross-section viewer — layout + Lao typography */
+
+@font-face {
+  font-family: 'Noto Sans Lao';
+  src: url('../vendor/fonts/NotoSansLao-lao.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0E81-0EDF, U+200C-200D, U+25CC;
+}
+@font-face {
+  font-family: 'Noto Sans Lao';
+  src: url('../vendor/fonts/NotoSansLao-latin.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+2000-206F, U+2212;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: 'Noto Sans Lao', 'Phetsarath OT', 'Saysettha OT', 'Lao UI', system-ui, sans-serif;
+  font-size: 15px;
+  color: #14212e;
+  background: #f4f6f8;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ---- header ---- */
+header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 14px;
+  background: #0f2740;
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  z-index: 1200;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-right: auto;
+}
+
+header label {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+select {
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid #3d5875;
+  background: #16344f;
+  color: #fff;
+  max-width: 46vw;
+}
+
+#download, #download-all {
+  font-size: 0.9rem;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: #1e88e5;
+  color: #fff;
+  text-decoration: none;
+  white-space: nowrap;
+}
+#download:hover { background: #1976d2; }
+#download-all { background: #2e9e5b; }
+#download-all:hover { background: #278a4f; }
+
+/* ---- main split ---- */
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 55% 45%;
+  min-height: 0;
+}
+
+#map {
+  height: 100%;
+  min-height: 0;
+  background: #0a1620;
+}
+
+#panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: #fff;
+  border-left: 1px solid #d7dee5;
+}
+
+#panel-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e3e9ee;
+}
+
+#info {
+  font-size: 0.85rem;
+  color: #33475b;
+  margin-right: auto;
+}
+
+#panel-head label { font-size: 0.8rem; color: #55708c; }
+
+#ve-select {
+  background: #fff;
+  color: #14212e;
+  border: 1px solid #c3ced8;
+}
+
+#chart-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+#chart {
+  position: absolute;
+  inset: 0;
+}
+
+#chart-prompt {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 20px;
+  font-size: 0.95rem;
+  color: #55708c;
+  background: #fff;
+  z-index: 5;
+}
+
+/* ---- map labels ---- */
+.xs-label {
+  background: rgba(10, 22, 32, 0.75);
+  border: none;
+  border-radius: 4px;
+  box-shadow: none;
+  color: #aef3ff;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 5px;
+}
+.xs-label::before { display: none; }
+
+/* ---- mobile ---- */
+@media (max-width: 900px) {
+  main {
+    grid-template-columns: 1fr;
+    grid-template-rows: 45vh minmax(0, 1fr);
+  }
+  #panel { border-left: none; border-top: 1px solid #d7dee5; }
+  header h1 { font-size: 0.95rem; width: 100%; }
+  select { max-width: 60vw; }
+}
