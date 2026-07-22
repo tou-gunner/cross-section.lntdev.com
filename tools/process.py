@@ -557,7 +557,7 @@ def write_outputs(out_dir, dataset_id, name, sections, longi, strays, qc, args):
     section_ids = []
 
     for idx, sec in enumerate(sections, start=1):
-        sid = f"XS_{idx:03d}"
+        sid = f"X-{idx}"
         section_ids.append(sid)
         pts, offs = sec["ordered"], sec["offsets"]
         lats, lngs = [], []
