@@ -11,9 +11,15 @@ function getJSON(url) {
   return cache.get(url);
 }
 
-export const loadIndex = () => getJSON('datasets/datasets.json');
-export const loadManifest = (path) => getJSON(`${path}/manifest.json`);
-export const loadLines = (path) => getJSON(`${path}/lines.json`);
-export const loadLongitudinal = (path) => getJSON(`${path}/longitudinal.json`);
-export const loadStrays = (path) => getJSON(`${path}/strays.json`);
-export const loadSection = (path, file) => getJSON(`${path}/${file}`);
+// Cache busting (site sits behind Cloudflare + a 12h expires rule): the index
+// is rewritten in place when datasets change, so fetch it fresh every load;
+// per-dataset files are keyed to the dataset's `updated` stamp from the index,
+// so a rebuild changes their URLs and needs no manual purge.
+const bust = (u) => (u ? `?u=${encodeURIComponent(u)}` : '');
+
+export const loadIndex = () => getJSON(`datasets/datasets.json?t=${Date.now()}`);
+export const loadManifest = (path, u) => getJSON(`${path}/manifest.json${bust(u)}`);
+export const loadLines = (path, u) => getJSON(`${path}/lines.json${bust(u)}`);
+export const loadLongitudinal = (path, u) => getJSON(`${path}/longitudinal.json${bust(u)}`);
+export const loadStrays = (path, u) => getJSON(`${path}/strays.json${bust(u)}`);
+export const loadSection = (path, file, u) => getJSON(`${path}/${file}${bust(u)}`);

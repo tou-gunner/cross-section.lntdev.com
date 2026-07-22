@@ -1,6 +1,6 @@
 // ECharts station–elevation profile with vertical-exaggeration control.
 /* global echarts */
-import { t } from './i18n.js?v=5';
+import { t } from './i18n.js?v=6';
 
 const GRID = { left: 74, right: 28, top: 48, bottom: 70 };
 const FONT = "'Noto Sans Lao', 'Phetsarath OT', system-ui, sans-serif";

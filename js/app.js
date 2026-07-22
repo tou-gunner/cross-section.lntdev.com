@@ -1,8 +1,8 @@
 // Boot + wiring: dataset/section pickers, hash deep-links, info panel.
-import { t, applyI18n } from './i18n.js?v=5';
-import { loadIndex, loadManifest, loadLines, loadLongitudinal, loadStrays, loadSection } from './data.js?v=5';
-import { initMap, drawDataset, selectSection as mapSelect, setHoverPoint, clearHoverPoint } from './map.js?v=5';
-import { initChart, showSection, showLongitudinal, setVE, clearChart } from './chart.js?v=5';
+import { t, applyI18n } from './i18n.js?v=6';
+import { loadIndex, loadManifest, loadLines, loadLongitudinal, loadStrays, loadSection } from './data.js?v=6';
+import { initMap, drawDataset, selectSection as mapSelect, setHoverPoint, clearHoverPoint } from './map.js?v=6';
+import { initChart, showSection, showLongitudinal, setVE, clearChart } from './chart.js?v=6';
 
 const $ = (id) => document.getElementById(id);
 const state = { index: null, dataset: null, manifest: null, sectionId: null };
@@ -37,7 +37,7 @@ async function pickSection(sectionId, { fit = true } = {}) {
   $('section-select').value = sectionId;
   showPrompt('');
   try {
-    const sec = await loadSection(state.dataset.path, m.file);
+    const sec = await loadSection(state.dataset.path, m.file, state.dataset.updated);
     showSection(sec);
     if (fit) mapSelect(sectionId);
     const dl = $('download');
@@ -59,7 +59,7 @@ async function pickLongitudinal() {
   $('section-select').value = '';
   $('download').style.display = 'none';
   showPrompt('');
-  const longi = await loadLongitudinal(state.dataset.path);
+  const longi = await loadLongitudinal(state.dataset.path, state.dataset.updated);
   showLongitudinal(longi);
   const lm = state.manifest.longitudinal;
   setInfo(`<b>${t.longitudinal}</b> · ${t.points}: ${lm.points}`);
@@ -77,8 +77,8 @@ async function pickDataset(id, sectionId = null) {
   clearHoverPoint();
   try {
     const [manifest, lines, longi, strays] = await Promise.all([
-      loadManifest(ds.path), loadLines(ds.path),
-      loadLongitudinal(ds.path), loadStrays(ds.path),
+      loadManifest(ds.path, ds.updated), loadLines(ds.path, ds.updated),
+      loadLongitudinal(ds.path, ds.updated), loadStrays(ds.path, ds.updated),
     ]);
     state.manifest = manifest;
     const dlAll = $('download-all');

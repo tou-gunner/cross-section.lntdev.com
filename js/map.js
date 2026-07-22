@@ -1,6 +1,6 @@
 // Leaflet plan-view map: basemaps, section lines, longitudinal line, strays.
 /* global L */
-import { t } from './i18n.js?v=5';
+import { t } from './i18n.js?v=6';
 
 const STYLE_NORMAL = { color: '#00e5ff', weight: 3, opacity: 0.9 };
 const STYLE_SELECTED = { color: '#ffd400', weight: 5, opacity: 1 };

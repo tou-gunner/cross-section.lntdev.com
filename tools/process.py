@@ -135,21 +135,40 @@ def fix_elevation(raw, fixes, no):
     return float(s)
 
 
-def read_points(path, fixes, warnings, z_band=(100.0, 400.0)):
-    pts = []
+def _csv_rows(path):
     with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        if len(header) < 4:
-            raise SystemExit(f"unexpected header in {path}: {header}")
-        for row in reader:
-            if not row or not row[0].strip():
-                continue
-            no = int(row[0])
-            z = fix_elevation(row[3], fixes, no)
-            if not (z_band[0] <= z <= z_band[1]):
-                warnings.append(f"point No.{no}: elevation {z} outside sanity band {z_band}")
-            pts.append({"no": no, "n": float(row[1]), "e": float(row[2]), "z": z})
+        yield from csv.reader(f)
+
+
+def _xlsx_rows(path):
+    """First worksheet of an .xlsx as rows of strings (lazy openpyxl import)."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        raise SystemExit("reading .xlsx requires openpyxl (pip install openpyxl)"
+                         " — or export the sheet to CSV")
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        for row in wb.worksheets[0].iter_rows(values_only=True):
+            yield ["" if c is None else str(c) for c in row[:4]]
+    finally:
+        wb.close()
+
+
+def read_points(path, fixes, warnings, z_band=(100.0, 400.0)):
+    rows = _xlsx_rows(path) if path.lower().endswith(".xlsx") else _csv_rows(path)
+    pts = []
+    header = next(rows)
+    if len(header) < 4:
+        raise SystemExit(f"unexpected header in {path}: {header}")
+    for row in rows:
+        if not row or not row[0].strip():
+            continue
+        no = int(float(row[0]))  # openpyxl may yield "13.0"
+        z = fix_elevation(row[3], fixes, no)
+        if not (z_band[0] <= z <= z_band[1]):
+            warnings.append(f"point No.{no}: elevation {z} outside sanity band {z_band}")
+        pts.append({"no": no, "n": float(row[1]), "e": float(row[2]), "z": z})
     return pts
 
 
@@ -219,6 +238,126 @@ def station(p, line):
 def perp_dist(p, line):
     ce, cn, ux, uy = line
     return abs(-(p["e"] - ce) * uy + (p["n"] - cn) * ux)
+
+
+def join_collinear_sections(sections, bearing_tol, perp_tol, max_gap, qc):
+    """Union section runs that are collinear pieces of one physical
+    cross-section (a main-channel line plus overbank 'wing' lines surveyed
+    as separate runs, possibly in a distant block of the file).
+
+    Pair rule: PCA bearing difference <= bearing_tol (deg, mod 180), mutual
+    centroid-to-line perpendicular distance <= perp_tol (m), and minimum
+    end-to-end gap <= max_gap (m); grouping is transitive. Distinct adjacent
+    cross-sections are parallel but laterally offset, so they never pass the
+    perp test. Near-miss pairs are reported as warnings for human review."""
+    n = len(sections)
+    if n < 2:
+        return sections
+
+    geom = []
+    for sec in sections:
+        line = sec["line"]
+        st = [station(p, line) for p in sec["pts"]]
+        geom.append({
+            "brg": math.degrees(math.atan2(line[3], line[2])) % 180.0,
+            "c": {"e": line[0], "n": line[1]},
+            "ends": [sec["pts"][st.index(min(st))], sec["pts"][st.index(max(st))]],
+        })
+
+    def bearing_diff(a, b):
+        d = abs(a - b) % 180.0
+        return min(d, 180.0 - d)
+
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    nearmiss = []
+    for i in range(n):
+        gi = geom[i]
+        for j in range(i + 1, n):
+            gj = geom[j]
+            bd = bearing_diff(gi["brg"], gj["brg"])
+            if bd > bearing_tol:
+                continue
+            pp = max(perp_dist(gj["c"], sections[i]["line"]),
+                     perp_dist(gi["c"], sections[j]["line"]))
+            gap = min(dist2d(p, q) for p in gi["ends"] for q in gj["ends"])
+            if pp <= perp_tol and gap <= max_gap:
+                parent[find(i)] = find(j)
+            elif pp <= perp_tol and gap <= 2 * max_gap:
+                nearmiss.append(("gap", i, j, bd, pp, gap))
+            elif pp <= 2 * perp_tol and gap <= max_gap:
+                nearmiss.append(("perp", i, j, bd, pp, gap))
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    result, joined = [], []
+    for members in groups.values():
+        if len(members) == 1:
+            result.append(sections[members[0]])  # untouched original dict
+            continue
+        pieces = sorted((sections[i] for i in members), key=lambda s: s["min_no"])
+        new_pts = [p for s in pieces for p in s["pts"]]
+        line = fit_line_pca(new_pts)
+        st = [station(p, line) for p in new_pts]
+        intervals = sorted(
+            (min(ps), max(ps)) for ps in
+            ([station(p, line) for p in s["pts"]] for s in pieces))
+        joined.append({
+            "piece_start_nos": [s["min_no"] for s in pieces],
+            "piece_points": [len(s["pts"]) for s in pieces],
+            "bearing_spread_deg": round(max(
+                bearing_diff(geom[i]["brg"], geom[j]["brg"])
+                for i in members for j in members), 2),
+            "max_perp_m": round(max(
+                perp_dist(geom[i]["c"], line) for i in members), 2),
+            "gaps_m": [round(max(0.0, b[0] - a[1]), 1)
+                       for a, b in zip(intervals, intervals[1:])],
+        })
+        result.append({"pts": new_pts, "line": line,
+                       "smin": min(st), "smax": max(st),
+                       "min_no": min(s["min_no"] for s in pieces), "merged": []})
+
+    if joined:
+        joined.sort(key=lambda g: g["piece_start_nos"][0])
+        qc["joined_sections"] = {
+            "params": {"bearing_tol_deg": bearing_tol, "perp_tol_m": perp_tol,
+                       "max_gap_m": max_gap},
+            "groups": joined,
+        }
+
+    seen = set()
+    for kind, i, j, bd, pp, gap in nearmiss:
+        ri, rj = find(i), find(j)
+        if ri == rj:
+            continue  # transitively joined anyway — not a real miss
+        key = (kind, min(ri, rj), max(ri, rj))
+        if key in seen:
+            continue
+        seen.add(key)
+        a, b = sections[i]["min_no"], sections[j]["min_no"]
+        if kind == "gap":
+            qc["warnings"].append(
+                f"join near-miss (gap): sections starting No.{a} and No.{b} "
+                f"collinear (bearing diff {bd:.2f} deg, perp {pp:.1f} m) but end "
+                f"gap {gap:.0f} m > --join-max-gap {max_gap:.0f} m — verify "
+                "whether one cross-section")
+        else:
+            qc["warnings"].append(
+                f"join near-miss (perp): sections starting No.{a} and No.{b} "
+                f"nearly collinear (bearing diff {bd:.2f} deg, end gap {gap:.0f} m) "
+                f"but perp {pp:.1f} m > --join-perp-tol {perp_tol:.0f} m — verify "
+                "whether one cross-section")
+
+    result.sort(key=lambda s: s["min_no"])
+    return result
 
 
 def merge_fragments(sections, fragments, perp_tol, ext_tol, qc):
@@ -559,6 +698,18 @@ def write_qc(out_dir, qc):
         f"merged fragments: {len(qc['merged_fragments'])}",
         *(f"  Nos {m['fragment_nos']} -> section starting No.{m['into_min_no']}"
           f" (max perp {m['max_perp_m']} m)" for m in qc["merged_fragments"]),
+    ]
+    js = qc.get("joined_sections")
+    if js:
+        p = js["params"]
+        lines += ["", f"joined collinear sections: {len(js['groups'])} groups "
+                  f"(bearing tol {p['bearing_tol_deg']} deg, perp tol "
+                  f"{p['perp_tol_m']} m, max gap {p['max_gap_m']} m)"]
+        lines += [f"  start Nos {g['piece_start_nos']} (pts {g['piece_points']})"
+                  f" -> one section (bearing spread {g['bearing_spread_deg']} deg,"
+                  f" max perp {g['max_perp_m']} m, gaps {g['gaps_m']} m)"
+                  for g in js["groups"]]
+    lines += [
         "",
         f"stray points: {qc['stray_points']}",
         f"projection round-trip worst error: {qc['projection_selftest_m']} m",
@@ -585,7 +736,9 @@ def update_datasets_index(index_path, dataset_id, name, out_dir, crs, datum):
     rel = os.path.relpath(os.path.abspath(out_dir), os.path.dirname(web_root))
     entry = {"id": dataset_id, "name": name, "path": rel.replace(os.sep, "/"),
              "crs": crs, "datum": datum,
-             "updated": datetime.date.today().isoformat()}
+             # full timestamp: the viewer uses this as a cache-busting key,
+             # so same-day rebuilds must produce a fresh value
+             "updated": datetime.datetime.now().isoformat(timespec="seconds")}
     idx["datasets"] = [d for d in idx["datasets"] if d["id"] != dataset_id] + [entry]
     jdump(idx, index_path, indent=2)
 
@@ -608,10 +761,26 @@ def main():
     ap.add_argument("--utm-zone", type=int, default=48)
     ap.add_argument("--hemisphere", default="N", choices=["N", "S"])
     ap.add_argument("--datum", default="MSL")
+    ap.add_argument("--z-min", type=float, default=100.0,
+                    help="elevation sanity-band floor in meters (default 100)")
+    ap.add_argument("--z-max", type=float, default=400.0,
+                    help="elevation sanity-band ceiling in meters (default 400)")
     ap.add_argument("--gap", type=float, default=50.0, help="section split gap (m)")
     ap.add_argument("--min-section-pts", type=int, default=10)
     ap.add_argument("--merge-perp", type=float, default=15.0)
     ap.add_argument("--merge-ext", type=float, default=200.0)
+    ap.add_argument("--join-collinear", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="join collinear section pieces (channel + overbank "
+                         "wings) into one cross-section")
+    ap.add_argument("--join-bearing-tol", type=float, default=3.0,
+                    help="join: max PCA bearing difference between pieces (deg)")
+    ap.add_argument("--join-perp-tol", type=float, default=25.0,
+                    help="join: max mutual centroid-to-line perpendicular "
+                         "distance (m); near-misses up to 2x are QC-warned — "
+                         "raise after visual inspection if flagged")
+    ap.add_argument("--join-max-gap", type=float, default=3000.0,
+                    help="join: max end-to-end gap between collinear pieces (m)")
     args = ap.parse_args()
 
     qc = {"generated": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -619,7 +788,8 @@ def main():
           "warnings": []}
 
     path = os.path.join(args.input, args.csv)
-    points = read_points(path, qc["elevation_fixes"], qc["warnings"])
+    z_band = (args.z_min, args.z_max)
+    points = read_points(path, qc["elevation_fixes"], qc["warnings"], z_band)
     qc["input_rows"] = len(points)
     nos = [p["no"] for p in points]
     if len(set(nos)) != len(nos):
@@ -646,6 +816,11 @@ def main():
         sections.append({"pts": r, "line": line, "smin": min(st), "smax": max(st),
                          "min_no": min(p["no"] for p in r), "merged": []})
 
+    if args.join_collinear:
+        sections = join_collinear_sections(
+            sections, args.join_bearing_tol, args.join_perp_tol,
+            args.join_max_gap, qc)
+
     strays = merge_fragments(sections, fragments, args.merge_perp, args.merge_ext, qc)
 
     for sec in sections:
@@ -659,7 +834,7 @@ def main():
     if args.check_csv:
         cf, cw = [], []
         cpath = os.path.join(args.input, args.check_csv)
-        cpoints = {p["no"]: p for p in read_points(cpath, cf, cw)}
+        cpoints = {p["no"]: p for p in read_points(cpath, cf, cw, z_band)}
         max_dev, over, rows = 0.0, 0, 0
         for p in points:
             q = cpoints.get(p["no"])
@@ -687,9 +862,11 @@ def main():
         update_datasets_index(args.index, args.dataset_id, args.name,
                               args.out, manifest["crs"], args.datum)
 
+    joined_n = len(qc.get("joined_sections", {}).get("groups", []))
     print(f"OK: {qc['sections']} sections, {section_points} section points, "
           f"{longi['points']} longitudinal, {len(strays)} strays, "
-          f"{len(qc['elevation_fixes'])} elevation fixes")
+          f"{len(qc['elevation_fixes'])} elevation fixes"
+          + (f", {joined_n} collinear joins" if joined_n else ""))
     print(f"QC report: {os.path.join(args.out, 'qc_report.txt')}")
 
 
