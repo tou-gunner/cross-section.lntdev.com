@@ -3,7 +3,7 @@ export const t = {
   title: 'ລະບົບເບິ່ງໜ້າຕັດຂວາງແມ່ນ້ຳ',
   dataset: 'ຊຸດຂໍ້ມູນ',
   section: 'ໜ້າຕັດຂວາງ',
-  elevation: 'ລະດັບຄວາມສູງ (ມ, MSL)',
+  elevation: 'ລະດັບຄວາມສູງ', // datum suffix appended dynamically per dataset
   offset: 'ໄລຍະຕາມແນວຕັດ (ມ)',
   chainage: 'ໄລຍະຕາມລຳນ້ຳ (ມ)',
   download_csv: 'ດາວໂຫຼດ CSV',

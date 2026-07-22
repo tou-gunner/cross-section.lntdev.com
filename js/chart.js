@@ -1,6 +1,6 @@
 // ECharts station–elevation profile with vertical-exaggeration control.
 /* global echarts */
-import { t } from './i18n.js?v=7';
+import { t } from './i18n.js?v=9';
 
 const GRID = { left: 74, right: 28, top: 48, bottom: 70 };
 const FONT = "'Noto Sans Lao', 'Phetsarath OT', system-ui, sans-serif";
@@ -54,7 +54,7 @@ function buildSeries(sec) {
   return { points, meta };
 }
 
-function baseOption(id, xLabel, points) {
+function baseOption(id, xLabel, points, datum, exportName) {
   return {
     textStyle: { fontFamily: FONT },
     title: { text: id, left: 8, top: 4, textStyle: { fontSize: 14, fontWeight: 700 } },
@@ -68,7 +68,7 @@ function baseOption(id, xLabel, points) {
         const m = current.meta[p.dataIndex];
         if (!m) return '';
         let html = `${t.distance}: <b>${p.value[0].toFixed(2)}</b> ${t.meters}<br>`
-          + `${t.level}: <b>${m.z.toFixed(3)}</b> ${t.meters} (MSL)`;
+          + `${t.level}: <b>${m.z.toFixed(3)}</b> ${t.meters} (${datum})`;
         if (m.n !== undefined) {
           html += `<br>N: ${m.n.toFixed(3)} / E: ${m.e.toFixed(3)}`
             + `<br>${t.point_no} ${m.no}`;
@@ -81,7 +81,7 @@ function baseOption(id, xLabel, points) {
       feature: {
         dataZoom: { yAxisIndex: 'none', title: { zoom: t.zoom_x, back: t.restore } },
         restore: { title: t.restore },
-        saveAsImage: { name: id, title: t.save_png, backgroundColor: '#ffffff' },
+        saveAsImage: { name: exportName || id, title: t.save_png, backgroundColor: '#ffffff' },
       },
     },
     dataZoom: [
@@ -94,7 +94,7 @@ function baseOption(id, xLabel, points) {
       axisLabel: { formatter: (v) => Math.round(v) },
     },
     yAxis: {
-      type: 'value', name: t.elevation, nameLocation: 'middle', nameGap: 52,
+      type: 'value', name: `${t.elevation} (ມ, ${datum})`, nameLocation: 'middle', nameGap: 52,
       scale: true, axisLabel: { formatter: (v) => v.toFixed(1) },
     },
     series: [{
@@ -107,18 +107,19 @@ function baseOption(id, xLabel, points) {
   };
 }
 
-export function showSection(sec) {
+export function showSection(sec, dsId) {
   const { points, meta } = buildSeries(sec);
   current = {
     points, meta, id: sec.id,
     xmin: sec.offset[0], xmax: sec.offset[sec.offset.length - 1],
   };
   chart.clear();
-  chart.setOption(baseOption(sec.id, t.offset, points));
+  chart.setOption(baseOption(sec.id, t.offset, points, sec.datum || 'MSL',
+    dsId ? `${dsId}_${sec.id}` : sec.id));
   applyVE();
 }
 
-export function showLongitudinal(longi) {
+export function showLongitudinal(longi, datum = 'MSL', dsId) {
   const points = [];
   const meta = [];
   longi.features.forEach((f, fi) => {
@@ -139,7 +140,8 @@ export function showLongitudinal(longi) {
     xmax: points.length ? points[points.length - 1][0] : 0,
   };
   chart.clear();
-  chart.setOption(baseOption(t.longitudinal, t.chainage, points));
+  chart.setOption(baseOption(t.longitudinal, t.chainage, points, datum,
+    dsId ? `${dsId}_longitudinal` : undefined));
   applyVE();
 }
 

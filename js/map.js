@@ -1,7 +1,7 @@
 // Leaflet plan-view map: basemaps, section lines, multibeam lines,
 // longitudinal line, strays.
 /* global L */
-import { t } from './i18n.js?v=7';
+import { t } from './i18n.js?v=9';
 
 const STYLE_NORMAL = { color: '#00e5ff', weight: 3, opacity: 0.9 };
 const STYLE_MULTIBEAM = { color: '#2eff7b', weight: 3, opacity: 0.9 };

@@ -1,8 +1,8 @@
 // Boot + wiring: dataset/section pickers, hash deep-links, info panel.
-import { t, applyI18n } from './i18n.js?v=7';
-import { loadIndex, loadManifest, loadLines, loadMultibeamLines, loadLongitudinal, loadStrays, loadSection } from './data.js?v=7';
-import { initMap, drawDataset, selectSection as mapSelect, setHoverPoint, clearHoverPoint } from './map.js?v=7';
-import { initChart, showSection, showLongitudinal, setVE, clearChart } from './chart.js?v=7';
+import { t, applyI18n } from './i18n.js?v=9';
+import { loadIndex, loadManifest, loadLines, loadMultibeamLines, loadLongitudinal, loadStrays, loadSection } from './data.js?v=9';
+import { initMap, drawDataset, selectSection as mapSelect, setHoverPoint, clearHoverPoint } from './map.js?v=9';
+import { initChart, showSection, showLongitudinal, setVE, clearChart } from './chart.js?v=9';
 
 const $ = (id) => document.getElementById(id);
 const state = { index: null, dataset: null, manifest: null, sectionId: null };
@@ -39,15 +39,16 @@ async function pickSection(sectionId, { fit = true } = {}) {
   showPrompt('');
   try {
     const sec = await loadSection(state.dataset.path, m.file, state.dataset.updated);
-    showSection(sec);
+    showSection(sec, state.dataset.id);
     if (fit) mapSelect(sectionId);
     const dl = $('download');
     dl.href = `${state.dataset.path}/${m.csv}`;
-    dl.setAttribute('download', `${m.id}.csv`);
+    // dataset-qualified: twin MSL/Hondau datasets share section ids
+    dl.setAttribute('download', `${state.dataset.id}_${m.id}.csv`);
     dl.style.display = '';
     setInfo(
       `<b>${m.id}</b> · ${t.points}: ${m.points} · ${t.width}: ${m.length_m} ${t.meters}`
-      + ` · ${t.elevation.replace(' (ມ, MSL)', '')}: ${m.zmin}–${m.zmax} ${t.meters}`,
+      + ` · ${t.elevation}: ${m.zmin}–${m.zmax} ${t.meters}`,
     );
     setHash();
   } catch (err) {
@@ -61,7 +62,7 @@ async function pickLongitudinal() {
   $('download').style.display = 'none';
   showPrompt('');
   const longi = await loadLongitudinal(state.dataset.path, state.dataset.updated);
-  showLongitudinal(longi);
+  showLongitudinal(longi, state.dataset.datum || 'MSL', state.dataset.id);
   const lm = state.manifest.longitudinal;
   setInfo(`<b>${t.longitudinal}</b> · ${t.points}: ${lm.points}`);
   setHash();
