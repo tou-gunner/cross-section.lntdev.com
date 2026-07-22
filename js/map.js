@@ -1,13 +1,16 @@
-// Leaflet plan-view map: basemaps, section lines, longitudinal line, strays.
+// Leaflet plan-view map: basemaps, section lines, multibeam lines,
+// longitudinal line, strays.
 /* global L */
-import { t } from './i18n.js?v=6';
+import { t } from './i18n.js?v=7';
 
 const STYLE_NORMAL = { color: '#00e5ff', weight: 3, opacity: 0.9 };
+const STYLE_MULTIBEAM = { color: '#2eff7b', weight: 3, opacity: 0.9 };
 const STYLE_SELECTED = { color: '#ffd400', weight: 5, opacity: 1 };
 const LABEL_ZOOM = 13;
 
 let map;
 let sectionLayer = null;
+let multibeamLayer = null;
 let longiLayer = null;
 let strayLayer = null;
 let layerControl = null;
@@ -32,21 +35,25 @@ export function initMap(el) {
 }
 
 function refreshLabels() {
-  if (!sectionLayer) return;
   const permanent = map.getZoom() >= LABEL_ZOOM;
-  sectionLayer.eachLayer((l) => {
-    const wasPermanent = l._labelPermanent === true;
-    if (wasPermanent === permanent && l.getTooltip()) return;
-    l.unbindTooltip();
-    l.bindTooltip(l.feature.properties.id, {
-      permanent, direction: 'center', className: 'xs-label', sticky: !permanent,
+  [sectionLayer, multibeamLayer].forEach((grp) => {
+    if (!grp) return;
+    grp.eachLayer((l) => {
+      const wasPermanent = l._labelPermanent === true;
+      if (wasPermanent === permanent && l.getTooltip()) return;
+      l.unbindTooltip();
+      l.bindTooltip(l.feature.properties.id, {
+        permanent, direction: 'center', className: 'xs-label', sticky: !permanent,
+      });
+      l._labelPermanent = permanent;
     });
-    l._labelPermanent = permanent;
   });
 }
 
-export function drawDataset(lines, longi, strays, callbacks) {
-  [sectionLayer, longiLayer, strayLayer].forEach((l) => l && map.removeLayer(l));
+export function drawDataset(lines, mbLines, longi, strays, callbacks) {
+  [sectionLayer, multibeamLayer, longiLayer, strayLayer]
+    .forEach((l) => l && map.removeLayer(l));
+  if (multibeamLayer) layerControl.removeLayer(multibeamLayer);
   if (longiLayer) layerControl.removeLayer(longiLayer);
   if (strayLayer) layerControl.removeLayer(strayLayer);
   layersById = {};
@@ -57,9 +64,23 @@ export function drawDataset(lines, longi, strays, callbacks) {
     style: STYLE_NORMAL,
     onEachFeature: (f, l) => {
       layersById[f.properties.id] = l;
+      l._baseStyle = STYLE_NORMAL;
       l.on('click', () => callbacks.onSection(f.properties.id));
     },
   }).addTo(map);
+
+  multibeamLayer = L.geoJSON(mbLines, {
+    style: STYLE_MULTIBEAM,
+    onEachFeature: (f, l) => {
+      layersById[f.properties.id] = l;
+      l._baseStyle = STYLE_MULTIBEAM;
+      l.on('click', () => callbacks.onSection(f.properties.id));
+    },
+  });
+  if (mbLines.features.length) {
+    multibeamLayer.addTo(map); // visible by default — toggle via layer control
+    layerControl.addOverlay(multibeamLayer, t.multibeam);
+  }
   refreshLabels();
 
   longiLayer = L.geoJSON(longi, { style: { color: '#ff8c00', weight: 2.5, opacity: 0.9 } });
@@ -76,11 +97,15 @@ export function drawDataset(lines, longi, strays, callbacks) {
   }
 
   const b = sectionLayer.getBounds();
+  b.extend(multibeamLayer.getBounds());
   if (b.isValid()) map.fitBounds(b.pad(0.05), { animate: false });
 }
 
 export function selectSection(id) {
-  if (selectedId && layersById[selectedId]) layersById[selectedId].setStyle(STYLE_NORMAL);
+  if (selectedId && layersById[selectedId]) {
+    const prev = layersById[selectedId];
+    prev.setStyle(prev._baseStyle || STYLE_NORMAL);
+  }
   selectedId = id;
   const layer = layersById[id];
   if (!layer) return;

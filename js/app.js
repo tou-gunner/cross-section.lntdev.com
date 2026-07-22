@@ -1,8 +1,8 @@
 // Boot + wiring: dataset/section pickers, hash deep-links, info panel.
-import { t, applyI18n } from './i18n.js?v=6';
-import { loadIndex, loadManifest, loadLines, loadLongitudinal, loadStrays, loadSection } from './data.js?v=6';
-import { initMap, drawDataset, selectSection as mapSelect, setHoverPoint, clearHoverPoint } from './map.js?v=6';
-import { initChart, showSection, showLongitudinal, setVE, clearChart } from './chart.js?v=6';
+import { t, applyI18n } from './i18n.js?v=7';
+import { loadIndex, loadManifest, loadLines, loadMultibeamLines, loadLongitudinal, loadStrays, loadSection } from './data.js?v=7';
+import { initMap, drawDataset, selectSection as mapSelect, setHoverPoint, clearHoverPoint } from './map.js?v=7';
+import { initChart, showSection, showLongitudinal, setVE, clearChart } from './chart.js?v=7';
 
 const $ = (id) => document.getElementById(id);
 const state = { index: null, dataset: null, manifest: null, sectionId: null };
@@ -31,7 +31,8 @@ function setInfo(html) {
 }
 
 async function pickSection(sectionId, { fit = true } = {}) {
-  const m = state.manifest.sections.find((s) => s.id === sectionId);
+  const m = state.manifest.sections.find((s) => s.id === sectionId)
+    || (state.manifest.multibeam_sections || []).find((s) => s.id === sectionId);
   if (!m) return;
   state.sectionId = sectionId;
   $('section-select').value = sectionId;
@@ -76,8 +77,9 @@ async function pickDataset(id, sectionId = null) {
   clearChart();
   clearHoverPoint();
   try {
-    const [manifest, lines, longi, strays] = await Promise.all([
+    const [manifest, lines, mbLines, longi, strays] = await Promise.all([
       loadManifest(ds.path, ds.updated), loadLines(ds.path, ds.updated),
+      loadMultibeamLines(ds.path, ds.updated),
       loadLongitudinal(ds.path, ds.updated), loadStrays(ds.path, ds.updated),
     ]);
     state.manifest = manifest;
@@ -89,16 +91,19 @@ async function pickDataset(id, sectionId = null) {
     } else {
       dlAll.style.display = 'none';
     }
-    drawDataset(lines, longi, strays, {
+    drawDataset(lines, mbLines, longi, strays, {
       onSection: (sid) => pickSection(sid),
       onLongitudinal: () => pickLongitudinal(),
     });
     const sel = $('section-select');
+    const opt = (s) => `<option value="${s.id}">${s.id} (${s.length_m} ${t.meters})</option>`;
+    const mb = manifest.multibeam_sections || [];
     sel.innerHTML = `<option value="" disabled selected>${t.section}…</option>`
-      + manifest.sections.map((s) =>
-        `<option value="${s.id}">${s.id} (${s.length_m} ${t.meters})</option>`).join('');
+      + `<optgroup label="${t.section}">${manifest.sections.map(opt).join('')}</optgroup>`
+      + (mb.length ? `<optgroup label="${t.multibeam}">${mb.map(opt).join('')}</optgroup>` : '');
     $('download').style.display = 'none';
     setInfo(`<b>${ds.name}</b> · ${t.section}: ${manifest.counts.sections}`
+      + (mb.length ? ` · ${t.multibeam}: ${mb.length}` : '')
       + ` · ${t.points}: ${manifest.counts.total}`);
     if (sectionId) {
       await pickSection(sectionId);

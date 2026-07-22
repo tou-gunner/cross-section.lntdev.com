@@ -14,6 +14,7 @@ export const t = {
   osm: 'ແຜນທີ່ OSM',
   longitudinal: 'ເສັ້ນຕາມລຳນ້ຳ',
   strays: 'ຈຸດນອກແນວ',
+  multibeam: 'ໜ້າຕັດ Multibeam',
   points: 'ຈຳນວນຈຸດ',
   width: 'ຄວາມກວ້າງ',
   meters: 'ມ',

@@ -6,6 +6,12 @@ cross-section lines, reorders each section from the smaller-Easting bank to the
 larger-Easting bank, renumbers points, and writes a static dataset folder
 (JSON/GeoJSON for the web viewer + per-section CSV deliverables) plus a QC report.
 
+An optional multibeam CSV (same column format) is processed as a second,
+independent section stream: ids XMU-1..XMU-n, its own QC accounting, output to
+multibeam_lines.json + sections/XMU-*.json + csv/XMU-*.csv in the same dataset.
+No longitudinal-tail detection is applied to it — trailing spot points become
+strays.
+
 Pure stdlib (no numpy/pyproj). Python 3.10+.
 
 Usage example:
@@ -13,6 +19,8 @@ Usage example:
         --input "Data/4_Cross section_Pakchom" \
         --csv "Cross Section_MSL.csv" \
         --check-csv "Cross Section_Hondau.csv" --check-offset 0.14 \
+        --multibeam-csv "Section_multibeam-pakchom_MSL.csv" \
+        --multibeam-check-csv "Section_multibeam-pakchom_HONDAU.csv" \
         --dataset-id pakchom --name "PakChom" \
         --out datasets/pakchom --index datasets/datasets.json
 """
@@ -490,6 +498,115 @@ def orient_sections(sections, gap_thresh, qc):
                          "flipped_section_start_nos": flipped}
 
 
+def build_section_stream(points, args, qc):
+    """split -> classify -> (join) -> merge fragments -> sort along line.
+
+    The shared machinery for one survey stream (main or multibeam). `qc` must
+    have 'warnings' and 'merged_fragments' lists pre-created; join and merge
+    results are namespaced into it. Returns (sections, strays)."""
+    runs = split_on_gaps(points, args.gap)
+    sec_runs, fragments = classify_runs(runs, args.min_section_pts)
+    sections = []
+    for r in sec_runs:
+        line = fit_line_pca(r)
+        st = [station(p, line) for p in r]
+        sections.append({"pts": r, "line": line, "smin": min(st), "smax": max(st),
+                         "min_no": min(p["no"] for p in r), "merged": []})
+
+    if args.join_collinear:
+        sections = join_collinear_sections(
+            sections, args.join_bearing_tol, args.join_perp_tol,
+            args.join_max_gap, qc)
+
+    strays = merge_fragments(sections, fragments, args.merge_perp, args.merge_ext, qc)
+
+    for sec in sections:
+        sort_along_line(sec)
+    sections.sort(key=lambda s: min(p["no"] for p in s["pts"]))
+    return sections, strays
+
+
+def order_along_chain(sections, ref_sections, qc):
+    """Put `sections` (in place) into along-river order so ids follow the
+    river and orient_sections sees true neighbors.
+
+    Two steps: (1) repair out-of-sequence surveying by moving single sections
+    to the position that minimizes total centroid-chain length (file order is
+    kept wherever it is already shortest — the sections are dense and evenly
+    spaced, so the shortest open path through the centroids IS the along-river
+    order); (2) reverse the whole list if it runs opposite to the reference
+    (main-survey) chain, so numbering and the left-bank-downstream convention
+    match across streams. Must run before orient_sections."""
+    n = len(sections)
+    qc["ordering"] = {"moved": 0, "reversed": False}
+    if n < 2:
+        return
+    cents = [(s["line"][0], s["line"][1]) for s in sections]
+
+    def total(order):
+        return sum(math.hypot(cents[b][0] - cents[a][0], cents[b][1] - cents[a][1])
+                   for a, b in zip(order, order[1:]))
+
+    order = list(range(n))
+    best = total(order)
+    moved = 0
+    improved = True
+    while improved and moved < n:  # n moves is far beyond any real repair
+        improved = False
+        for i in range(n):
+            rest = order[:i] + order[i + 1:]
+            for j in range(n):
+                if j == i:
+                    continue
+                cand = rest[:j] + [order[i]] + rest[j:]
+                t = total(cand)
+                if t < best - 1e-6:
+                    order, best, improved = cand, t, True
+                    moved += 1
+                    break
+            if improved:
+                break
+    if moved:
+        sections[:] = [sections[i] for i in order]
+        qc["ordering"]["moved"] = moved
+        qc["warnings"].append(
+            f"file order does not follow the river — {moved} section move(s) "
+            "applied to restore along-river order")
+
+    if len(ref_sections) >= 2:
+        ve = sections[-1]["line"][0] - sections[0]["line"][0]
+        vn = sections[-1]["line"][1] - sections[0]["line"][1]
+        we = ref_sections[-1]["line"][0] - ref_sections[0]["line"][0]
+        wn = ref_sections[-1]["line"][1] - ref_sections[0]["line"][1]
+        if ve * we + vn * wn < 0:
+            sections.reverse()
+            qc["ordering"]["reversed"] = True
+            qc["warnings"].append(
+                "chain runs opposite to the main survey — section list "
+                "reversed so numbering matches the along-river convention")
+
+
+def datum_check(points, input_dir, check_csv, offset, z_band):
+    """Per-point elevation comparison against a second-datum export of the
+    same survey (keyed by point No.; coordinates are not compared)."""
+    cf, cw = [], []
+    cpath = os.path.join(input_dir, check_csv)
+    cpoints = {p["no"]: p for p in read_points(cpath, cf, cw, z_band)}
+    max_dev, over, rows = 0.0, 0, 0
+    for p in points:
+        q = cpoints.get(p["no"])
+        if q is None:
+            continue
+        rows += 1
+        dev = abs((p["z"] - q["z"]) - offset)
+        max_dev = max(max_dev, dev)
+        if dev > 0.01:
+            over += 1
+    return {"file": check_csv, "expected_offset": offset,
+            "rows": rows, "max_dev_m": round(max_dev, 4),
+            "rows_over_1cm": over}
+
+
 # ---------------------------------------------------------------------------
 # Longitudinal line
 # ---------------------------------------------------------------------------
@@ -549,15 +666,16 @@ def write_csv_zip(out_dir, dataset_id, section_ids):
             "bytes": os.path.getsize(zip_path)}
 
 
-def write_outputs(out_dir, dataset_id, name, sections, longi, strays, qc, args):
-    zone, northern = args.utm_zone, args.hemisphere.upper() == "N"
-    lat_all, lng_all = [], []
+def write_section_set(out_dir, sections, prefix, zone, northern, datum,
+                      lat_all, lng_all):
+    """Write per-section JSON + CSV for one section stream (ids <prefix>-<idx>).
+    Returns (manifest_sections, line_features, section_ids)."""
     manifest_sections = []
     line_features = []
     section_ids = []
 
     for idx, sec in enumerate(sections, start=1):
-        sid = f"X-{idx}"
+        sid = f"{prefix}-{idx}"
         section_ids.append(sid)
         pts, offs = sec["ordered"], sec["offsets"]
         lats, lngs = [], []
@@ -570,7 +688,7 @@ def write_outputs(out_dir, dataset_id, name, sections, longi, strays, qc, args):
         zs = [p["z"] for p in pts]
         sec_json = {
             "id": sid,
-            "datum": args.datum,
+            "datum": datum,
             "no": list(range(1, len(pts) + 1)),
             "offset": [round(o, 2) for o in offs],
             "z": [round(z, 3) for z in zs],
@@ -611,8 +729,25 @@ def write_outputs(out_dir, dataset_id, name, sections, longi, strays, qc, args):
                          "coordinates": [[lngs[i], lats[i]] for i in range(len(pts))]},
         })
 
+    return manifest_sections, line_features, section_ids
+
+
+def write_outputs(out_dir, dataset_id, name, sections, mb_sections, longi,
+                  strays, mb_strays, qc, args):
+    zone, northern = args.utm_zone, args.hemisphere.upper() == "N"
+    lat_all, lng_all = [], []
+
+    manifest_sections, line_features, section_ids = write_section_set(
+        out_dir, sections, "X", zone, northern, args.datum, lat_all, lng_all)
     jdump({"type": "FeatureCollection", "features": line_features},
           os.path.join(out_dir, "lines.json"))
+
+    # multibeam stream: always write the file (empty when absent) so the
+    # viewer's fetch never 404s on a fresh rebuild
+    mb_manifest_sections, mb_line_features, mb_ids = write_section_set(
+        out_dir, mb_sections, "XMU", zone, northern, args.datum, lat_all, lng_all)
+    jdump({"type": "FeatureCollection", "features": mb_line_features},
+          os.path.join(out_dir, "multibeam_lines.json"))
 
     # longitudinal line
     longi_features = []
@@ -636,27 +771,33 @@ def write_outputs(out_dir, dataset_id, name, sections, longi, strays, qc, args):
     jdump({"type": "FeatureCollection", "features": longi_features},
           os.path.join(out_dir, "longitudinal.json"))
 
-    # strays
+    # strays (multibeam-origin points carry a "source" property)
     stray_features = []
-    for s in strays:
-        lat, lng = utm_to_wgs84(s["e"], s["n"], zone, northern)
-        lat, lng = round(lat, 6), round(lng, 6)
-        lat_all.append(lat)
-        lng_all.append(lng)
-        stray_features.append({
-            "type": "Feature",
-            "properties": {"no": s["no"], "n": round(s["n"], 3), "e": round(s["e"], 3),
-                           "z": round(s["z"], 3), "reason": s["reason"],
-                           "nearest_section_min_no": s["nearest_section_min_no"],
-                           "perp_dist_m": s["perp_dist_m"]},
-            "geometry": {"type": "Point", "coordinates": [lng, lat]},
-        })
+    for source, batch in ((None, strays), ("multibeam", mb_strays)):
+        for s in batch:
+            lat, lng = utm_to_wgs84(s["e"], s["n"], zone, northern)
+            lat, lng = round(lat, 6), round(lng, 6)
+            lat_all.append(lat)
+            lng_all.append(lng)
+            props = {"no": s["no"], "n": round(s["n"], 3), "e": round(s["e"], 3),
+                     "z": round(s["z"], 3), "reason": s["reason"],
+                     "nearest_section_min_no": s["nearest_section_min_no"],
+                     "perp_dist_m": s["perp_dist_m"]}
+            if source:
+                props["source"] = source
+            stray_features.append({
+                "type": "Feature",
+                "properties": props,
+                "geometry": {"type": "Point", "coordinates": [lng, lat]},
+            })
     jdump({"type": "FeatureCollection", "features": stray_features},
           os.path.join(out_dir, "strays.json"))
 
-    csv_zip = write_csv_zip(out_dir, dataset_id, section_ids)
+    csv_zip = write_csv_zip(out_dir, dataset_id, section_ids + mb_ids)
 
     section_points = sum(len(s["ordered"]) for s in sections)
+    mb_section_points = sum(len(s["ordered"]) for s in mb_sections)
+    mb_qc = qc.get("multibeam")
     manifest = {
         "id": dataset_id,
         "name": name,
@@ -666,12 +807,18 @@ def write_outputs(out_dir, dataset_id, name, sections, longi, strays, qc, args):
         "bounds": [[round(min(lat_all), 6), round(min(lng_all), 6)],
                    [round(max(lat_all), 6), round(max(lng_all), 6)]],
         "counts": {"sections": len(sections), "section_points": section_points,
-                   "longitudinal_points": longi["points"], "stray_points": len(strays),
-                   "total": qc["input_rows"]},
+                   "longitudinal_points": longi["points"],
+                   "stray_points": len(strays) + len(mb_strays),
+                   "multibeam_sections": len(mb_sections),
+                   "multibeam_section_points": mb_section_points,
+                   "multibeam_stray_points": len(mb_strays),
+                   "total": qc["input_rows"] + (mb_qc["input_rows"] if mb_qc else 0)},
         "sections": manifest_sections,
+        "multibeam_sections": mb_manifest_sections,
+        "multibeam_lines": "multibeam_lines.json",
         "longitudinal": {"file": "longitudinal.json", "points": longi["points"],
                          "length_m": longi["length_m"]},
-        "strays": {"file": "strays.json", "points": len(strays)},
+        "strays": {"file": "strays.json", "points": len(strays) + len(mb_strays)},
         "csv_zip": csv_zip,
         "qc": "qc_report.json",
     }
@@ -719,10 +866,48 @@ def write_qc(out_dir, qc):
         lines += ["", f"datum cross-check vs {c['file']} (expected offset {c['expected_offset']} m):",
                   f"  rows compared: {c['rows']}, max deviation: {c['max_dev_m']} m,"
                   f" rows > 0.01 m: {c['rows_over_1cm']}"]
+    mb = qc.get("multibeam")
+    if mb:
+        lines += [
+            "",
+            f"multibeam input: {mb['input_file']} ({mb['input_rows']} rows)",
+            f"multibeam sections: {mb['sections']}"
+            + (f" — {mb['ordering']['moved']} out-of-sequence move(s)"
+               if mb.get("ordering", {}).get("moved") else "")
+            + (" — list reversed to match main chain direction"
+               if mb.get("ordering", {}).get("reversed") else ""),
+            f"multibeam orientation: {mb['orientation']['flipped']} sections flipped",
+            f"multibeam merged fragments: {len(mb['merged_fragments'])}",
+            *(f"  Nos {m['fragment_nos']} -> section starting No.{m['into_min_no']}"
+              f" (max perp {m['max_perp_m']} m)" for m in mb["merged_fragments"]),
+            f"multibeam stray points: {mb['stray_points']}",
+            f"multibeam projection round-trip worst error: {mb['projection_selftest_m']} m",
+        ]
+        mjs = mb.get("joined_sections")
+        if mjs:
+            p = mjs["params"]
+            lines += [f"multibeam joined collinear sections: {len(mjs['groups'])} groups "
+                      f"(bearing tol {p['bearing_tol_deg']} deg, perp tol "
+                      f"{p['perp_tol_m']} m, max gap {p['max_gap_m']} m)"]
+            lines += [f"  start Nos {g['piece_start_nos']} (pts {g['piece_points']})"
+                      f" -> one section (bearing spread {g['bearing_spread_deg']} deg,"
+                      f" max perp {g['max_perp_m']} m, gaps {g['gaps_m']} m)"
+                      for g in mjs["groups"]]
+        if mb.get("check"):
+            c = mb["check"]
+            lines += [f"multibeam datum cross-check vs {c['file']}"
+                      f" (expected offset {c['expected_offset']} m):",
+                      f"  rows compared: {c['rows']}, max deviation: {c['max_dev_m']} m,"
+                      f" rows > 0.01 m: {c['rows_over_1cm']}"]
+        if mb["warnings"]:
+            lines += ["multibeam warnings:"] + [f"  {w}" for w in mb["warnings"]]
     if qc["warnings"]:
         lines += ["", "warnings:"] + [f"  {w}" for w in qc["warnings"]]
     lines += ["", f"INVARIANT section+longitudinal+stray == input: "
               f"{qc['invariant']['sum']} == {qc['input_rows']} -> {qc['invariant']['ok']}"]
+    if mb:
+        lines += [f"INVARIANT multibeam section+stray == input: "
+                  f"{mb['invariant']['sum']} == {mb['input_rows']} -> {mb['invariant']['ok']}"]
     with open(os.path.join(out_dir, "qc_report.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -754,6 +939,11 @@ def main():
     ap.add_argument("--check-csv", help="second-datum CSV for cross-checking")
     ap.add_argument("--check-offset", type=float, default=0.0,
                     help="expected (main - check) elevation offset in meters")
+    ap.add_argument("--multibeam-csv",
+                    help="multibeam survey CSV filename inside --input "
+                         "(processed as a second section stream, ids XMU-n)")
+    ap.add_argument("--multibeam-check-csv",
+                    help="second-datum multibeam CSV (uses --check-offset)")
     ap.add_argument("--dataset-id", required=True)
     ap.add_argument("--name", required=True, help="display name (may be Lao)")
     ap.add_argument("--out", required=True, help="dataset output folder")
@@ -807,47 +997,15 @@ def main():
                   "end_no": tail[-1]["no"] if tail else None,
                   "points": longi["points"], "length_m": longi["length_m"]}
 
-    runs = split_on_gaps(head, args.gap)
-    sec_runs, fragments = classify_runs(runs, args.min_section_pts)
-    sections = []
-    for r in sec_runs:
-        line = fit_line_pca(r)
-        st = [station(p, line) for p in r]
-        sections.append({"pts": r, "line": line, "smin": min(st), "smax": max(st),
-                         "min_no": min(p["no"] for p in r), "merged": []})
-
-    if args.join_collinear:
-        sections = join_collinear_sections(
-            sections, args.join_bearing_tol, args.join_perp_tol,
-            args.join_max_gap, qc)
-
-    strays = merge_fragments(sections, fragments, args.merge_perp, args.merge_ext, qc)
-
-    for sec in sections:
-        sort_along_line(sec)
-    sections.sort(key=lambda s: min(p["no"] for p in s["pts"]))
+    sections, strays = build_section_stream(head, args, qc)
     orient_sections(sections, args.gap, qc)
     qc["sections"] = len(sections)
     qc["stray_points"] = len(strays)
 
     # datum cross-check
     if args.check_csv:
-        cf, cw = [], []
-        cpath = os.path.join(args.input, args.check_csv)
-        cpoints = {p["no"]: p for p in read_points(cpath, cf, cw, z_band)}
-        max_dev, over, rows = 0.0, 0, 0
-        for p in points:
-            q = cpoints.get(p["no"])
-            if q is None:
-                continue
-            rows += 1
-            dev = abs((p["z"] - q["z"]) - args.check_offset)
-            max_dev = max(max_dev, dev)
-            if dev > 0.01:
-                over += 1
-        qc["check"] = {"file": args.check_csv, "expected_offset": args.check_offset,
-                       "rows": rows, "max_dev_m": round(max_dev, 4),
-                       "rows_over_1cm": over}
+        qc["check"] = datum_check(points, args.input, args.check_csv,
+                                  args.check_offset, z_band)
 
     section_points = sum(len(s["ordered"]) for s in sections)
     total = section_points + longi["points"] + len(strays)
@@ -855,8 +1013,45 @@ def main():
     if not qc["invariant"]["ok"]:
         raise SystemExit(f"POINT ACCOUNTING FAILED: {total} != {qc['input_rows']}")
 
+    # multibeam stream (optional): same machinery, separate accounting.
+    # No longitudinal-tail detection — trailing spot points become
+    # fragments -> strays.
+    mb_sections, mb_strays, mb_qc = [], [], None
+    if args.multibeam_csv:
+        mb_qc = {"input_file": args.multibeam_csv, "elevation_fixes": [],
+                 "merged_fragments": [], "warnings": []}
+        mb_points = read_points(os.path.join(args.input, args.multibeam_csv),
+                                mb_qc["elevation_fixes"], mb_qc["warnings"], z_band)
+        mb_qc["input_rows"] = len(mb_points)
+        if not mb_points:
+            raise SystemExit(f"multibeam input has no data rows: {args.multibeam_csv}")
+        mb_nos = [p["no"] for p in mb_points]
+        if len(set(mb_nos)) != len(mb_nos):
+            raise SystemExit("duplicate point numbers in multibeam input")
+        mb_qc["projection_selftest_m"] = round(
+            projection_selftest(mb_points, args.utm_zone, northern), 6)
+        if mb_qc["projection_selftest_m"] > 0.01:
+            raise SystemExit("multibeam projection self-test failed: "
+                             f"{mb_qc['projection_selftest_m']} m")
+        mb_sections, mb_strays = build_section_stream(mb_points, args, mb_qc)
+        order_along_chain(mb_sections, sections, mb_qc)
+        orient_sections(mb_sections, args.gap, mb_qc)
+        mb_qc["sections"] = len(mb_sections)
+        mb_qc["stray_points"] = len(mb_strays)
+        if args.multibeam_check_csv:
+            mb_qc["check"] = datum_check(mb_points, args.input,
+                                         args.multibeam_check_csv,
+                                         args.check_offset, z_band)
+        mb_total = sum(len(s["ordered"]) for s in mb_sections) + len(mb_strays)
+        mb_qc["invariant"] = {"sum": mb_total, "ok": mb_total == mb_qc["input_rows"]}
+        if not mb_qc["invariant"]["ok"]:
+            raise SystemExit(
+                f"MULTIBEAM POINT ACCOUNTING FAILED: {mb_total} != {mb_qc['input_rows']}")
+        qc["multibeam"] = mb_qc
+
     manifest = write_outputs(args.out, args.dataset_id, args.name,
-                             sections, longi, strays, qc, args)
+                             sections, mb_sections, longi, strays, mb_strays,
+                             qc, args)
     write_qc(args.out, qc)
     if args.index:
         update_datasets_index(args.index, args.dataset_id, args.name,
@@ -867,6 +1062,12 @@ def main():
           f"{longi['points']} longitudinal, {len(strays)} strays, "
           f"{len(qc['elevation_fixes'])} elevation fixes"
           + (f", {joined_n} collinear joins" if joined_n else ""))
+    if mb_qc:
+        print(f"OK multibeam: {mb_qc['sections']} sections, "
+              f"{sum(len(s['ordered']) for s in mb_sections)} section points, "
+              f"{len(mb_strays)} strays"
+              + (", reordered" if mb_qc.get("ordering", {}).get("moved") else "")
+              + (", reversed" if mb_qc.get("ordering", {}).get("reversed") else ""))
     print(f"QC report: {os.path.join(args.out, 'qc_report.txt')}")
 
 
