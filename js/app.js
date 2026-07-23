@@ -1,8 +1,8 @@
 // Boot + wiring: dataset/section pickers, hash deep-links, info panel.
-import { t, applyI18n } from './i18n.js?v=9';
-import { loadIndex, loadManifest, loadLines, loadMultibeamLines, loadLongitudinal, loadStrays, loadSection } from './data.js?v=9';
-import { initMap, drawDataset, selectSection as mapSelect, setHoverPoint, clearHoverPoint } from './map.js?v=9';
-import { initChart, showSection, showLongitudinal, setVE, clearChart } from './chart.js?v=9';
+import { t, applyI18n } from './i18n.js?v=10';
+import { loadIndex, loadManifest, loadLines, loadMultibeamLines, loadLongitudinal, loadStrays, loadSection, bust } from './data.js?v=10';
+import { initMap, drawDataset, selectSection as mapSelect, setHoverPoint, clearHoverPoint } from './map.js?v=10';
+import { initChart, showSection, showLongitudinal, setVE, clearChart } from './chart.js?v=10';
 
 const $ = (id) => document.getElementById(id);
 const state = { index: null, dataset: null, manifest: null, sectionId: null };
@@ -42,7 +42,7 @@ async function pickSection(sectionId, { fit = true } = {}) {
     showSection(sec, state.dataset.id);
     if (fit) mapSelect(sectionId);
     const dl = $('download');
-    dl.href = `${state.dataset.path}/${m.csv}`;
+    dl.href = `${state.dataset.path}/${m.csv}${bust(state.dataset.updated)}`;
     // dataset-qualified: twin MSL/Hondau datasets share section ids
     dl.setAttribute('download', `${state.dataset.id}_${m.id}.csv`);
     dl.style.display = '';
@@ -86,7 +86,7 @@ async function pickDataset(id, sectionId = null) {
     state.manifest = manifest;
     const dlAll = $('download-all');
     if (manifest.csv_zip) {
-      dlAll.href = `${ds.path}/${manifest.csv_zip.file}`;
+      dlAll.href = `${ds.path}/${manifest.csv_zip.file}${bust(ds.updated)}`;
       dlAll.setAttribute('download', `${ds.id}_csv.zip`);
       dlAll.style.display = '';
     } else {

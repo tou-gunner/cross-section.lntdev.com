@@ -12,6 +12,14 @@ multibeam_lines.json + sections/XMU-*.json + csv/XMU-*.csv in the same dataset.
 No longitudinal-tail detection is applied to it — trailing spot points become
 strays.
 
+An optional extension CSV/XLSX (--extend-csv) is a re-delivery of some
+sections extended with newly surveyed ground: the affected sections are
+re-sent in full (original geometry plus the prolongation). Points that
+exactly re-deliver an existing main-survey point are dropped; the genuinely
+new points are renumbered above the main numbering and folded into the main
+stream, where the collinear-join pass unions them with the sections they
+prolong (section ids stay stable).
+
 Pure stdlib (no numpy/pyproj). Python 3.10+.
 
 Usage example:
@@ -166,17 +174,27 @@ def _xlsx_rows(path):
 def read_points(path, fixes, warnings, z_band=(100.0, 400.0)):
     rows = _xlsx_rows(path) if path.lower().endswith(".xlsx") else _csv_rows(path)
     pts = []
-    header = next(rows)
-    if len(header) < 4:
-        raise SystemExit(f"unexpected header in {path}: {header}")
-    for row in rows:
+
+    def parse(row):
         if not row or not row[0].strip():
-            continue
+            return
         no = int(float(row[0]))  # openpyxl may yield "13.0"
         z = fix_elevation(row[3], fixes, no)
         if not (z_band[0] <= z <= z_band[1]):
             warnings.append(f"point No.{no}: elevation {z} outside sanity band {z_band}")
         pts.append({"no": no, "n": float(row[1]), "e": float(row[2]), "z": z})
+
+    first = next(rows)
+    if len(first) < 4:
+        raise SystemExit(f"unexpected header in {path}: {first}")
+    try:
+        float(first[0])  # headerless export: the first row is already data
+    except ValueError:
+        pass             # normal header row — skip it
+    else:
+        parse(first)     # outside the probe: first-row cell errors fail loudly
+    for row in rows:
+        parse(row)
     return pts
 
 
@@ -608,6 +626,60 @@ def datum_check(points, input_dir, check_csv, offset, z_band):
 
 
 # ---------------------------------------------------------------------------
+# Extension re-delivery
+# ---------------------------------------------------------------------------
+
+def merge_extension_points(points, ext_points, ext_qc, warnings):
+    """Fold an extension re-delivery into the main survey.
+
+    Extension deliveries re-send the affected sections in full (the original
+    geometry plus the newly surveyed prolongation), so every extension point
+    that coincides with an existing main-survey point (<= 5 cm; the files
+    differ only in decimal precision) is dropped as a re-delivered duplicate.
+    Survivors are renumbered by a power-of-ten offset above the main
+    numbering, keeping point Nos unique and provenance visible in orig_no and
+    QC. Returns the renumbered new points, ready to join the main stream."""
+    cell = 1.0  # spatial hash cell (m); tol << cell so one-ring lookup suffices
+    index = {}
+    for p in points:
+        index.setdefault((int(p["n"] // cell), int(p["e"] // cell)), []).append(p)
+
+    def coincident(p, tol=0.05):
+        ci, cj = int(p["n"] // cell), int(p["e"] // cell)
+        best = None
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for q in index.get((ci + di, cj + dj), ()):
+                    if dist2d(p, q) <= tol and (
+                            best is None or dist2d(p, q) < dist2d(p, best)):
+                        best = q
+        return best
+
+    kept, dup, z_mismatch = [], 0, 0
+    for p in ext_points:
+        q = coincident(p)
+        if q is not None:
+            dup += 1
+            # compare in whole millimeters: survey z has 3 decimals, so this
+            # is deterministic across datum twins (a raw 1e-3 float threshold
+            # flips on noise and made the twins warn differently)
+            if abs(round((p["z"] - q["z"]) * 1000)) > 1:
+                z_mismatch += 1
+                warnings.append(
+                    f"extension No.{p['no']} re-delivers main No.{q['no']} at the "
+                    f"same location but elevation differs: {p['z']} vs {q['z']}")
+            continue
+        kept.append(p)
+
+    offset = 10 ** len(str(max(p["no"] for p in points)))
+    for p in kept:
+        p["no"] += offset
+    ext_qc.update({"duplicates_dropped": dup, "z_mismatches_at_duplicates": z_mismatch,
+                   "kept_rows": len(kept), "no_offset": offset})
+    return kept
+
+
+# ---------------------------------------------------------------------------
 # Longitudinal line
 # ---------------------------------------------------------------------------
 
@@ -798,6 +870,7 @@ def write_outputs(out_dir, dataset_id, name, sections, mb_sections, longi,
     section_points = sum(len(s["ordered"]) for s in sections)
     mb_section_points = sum(len(s["ordered"]) for s in mb_sections)
     mb_qc = qc.get("multibeam")
+    ext_kept = qc.get("extension", {}).get("kept_rows", 0)
     manifest = {
         "id": dataset_id,
         "name": name,
@@ -809,10 +882,12 @@ def write_outputs(out_dir, dataset_id, name, sections, mb_sections, longi,
         "counts": {"sections": len(sections), "section_points": section_points,
                    "longitudinal_points": longi["points"],
                    "stray_points": len(strays) + len(mb_strays),
+                   "extension_points": ext_kept,
                    "multibeam_sections": len(mb_sections),
                    "multibeam_section_points": mb_section_points,
                    "multibeam_stray_points": len(mb_strays),
-                   "total": qc["input_rows"] + (mb_qc["input_rows"] if mb_qc else 0)},
+                   "total": qc["input_rows"] + ext_kept
+                            + (mb_qc["input_rows"] if mb_qc else 0)},
         "sections": manifest_sections,
         "multibeam_sections": mb_manifest_sections,
         "multibeam_lines": "multibeam_lines.json",
@@ -866,6 +941,26 @@ def write_qc(out_dir, qc):
         lines += ["", f"datum cross-check vs {c['file']} (expected offset {c['expected_offset']} m):",
                   f"  rows compared: {c['rows']}, max deviation: {c['max_dev_m']} m,"
                   f" rows > 0.01 m: {c['rows_over_1cm']}"]
+    ext = qc.get("extension")
+    if ext:
+        lines += [
+            "",
+            f"extension input: {ext['input_file']} ({ext['input_rows']} rows)",
+            f"  re-delivered duplicates dropped: {ext['duplicates_dropped']}"
+            f" (elevation mismatches at duplicates: {ext['z_mismatches_at_duplicates']})",
+            f"  new points kept: {ext['kept_rows']} (renumbered +{ext['no_offset']})",
+            f"  projection round-trip worst error: {ext['projection_selftest_m']} m",
+        ]
+        if ext["elevation_fixes"]:
+            lines += [f"  elevation fixes (percent-format cells): {len(ext['elevation_fixes'])}"]
+        if ext.get("check"):
+            c = ext["check"]
+            lines += [f"  datum cross-check vs {c['file']}"
+                      f" (expected offset {c['expected_offset']} m):",
+                      f"    rows compared: {c['rows']}, max deviation: {c['max_dev_m']} m,"
+                      f" rows > 0.01 m: {c['rows_over_1cm']}"]
+        if ext["warnings"]:
+            lines += ["  extension warnings:"] + [f"    {w}" for w in ext["warnings"]]
     mb = qc.get("multibeam")
     if mb:
         lines += [
@@ -903,8 +998,10 @@ def write_qc(out_dir, qc):
             lines += ["multibeam warnings:"] + [f"  {w}" for w in mb["warnings"]]
     if qc["warnings"]:
         lines += ["", "warnings:"] + [f"  {w}" for w in qc["warnings"]]
-    lines += ["", f"INVARIANT section+longitudinal+stray == input: "
-              f"{qc['invariant']['sum']} == {qc['input_rows']} -> {qc['invariant']['ok']}"]
+    inv_label = "input + extension kept" if qc.get("extension") else "input"
+    inv_expected = qc["invariant"].get("expected", qc["input_rows"])
+    lines += ["", f"INVARIANT section+longitudinal+stray == {inv_label}: "
+              f"{qc['invariant']['sum']} == {inv_expected} -> {qc['invariant']['ok']}"]
     if mb:
         lines += [f"INVARIANT multibeam section+stray == input: "
                   f"{mb['invariant']['sum']} == {mb['input_rows']} -> {mb['invariant']['ok']}"]
@@ -939,6 +1036,13 @@ def main():
     ap.add_argument("--check-csv", help="second-datum CSV for cross-checking")
     ap.add_argument("--check-offset", type=float, default=0.0,
                     help="expected (main - check) elevation offset in meters")
+    ap.add_argument("--extend-csv",
+                    help="extension re-delivery CSV/XLSX (relative to --input): "
+                         "affected sections re-sent in full with newly surveyed "
+                         "prolongations; re-delivered duplicates are dropped and "
+                         "the new ground joins the main section stream")
+    ap.add_argument("--extend-check-csv",
+                    help="second-datum extension file (uses --check-offset)")
     ap.add_argument("--multibeam-csv",
                     help="multibeam survey CSV filename inside --input "
                          "(processed as a second section stream, ids XMU-n)")
@@ -972,6 +1076,8 @@ def main():
     ap.add_argument("--join-max-gap", type=float, default=3000.0,
                     help="join: max end-to-end gap between collinear pieces (m)")
     args = ap.parse_args()
+    if args.extend_check_csv and not args.extend_csv:
+        ap.error("--extend-check-csv requires --extend-csv")
 
     qc = {"generated": datetime.datetime.now().isoformat(timespec="seconds"),
           "input_file": args.csv, "elevation_fixes": [], "merged_fragments": [],
@@ -997,6 +1103,37 @@ def main():
                   "end_no": tail[-1]["no"] if tail else None,
                   "points": longi["points"], "length_m": longi["length_m"]}
 
+    # extension stream (optional): a re-delivery of some sections extended
+    # with newly surveyed ground. Runs after tail detection (the extension
+    # has no longitudinal line) so the new points join the section stream,
+    # where collinear-join unions them with the sections they prolong.
+    ext_qc = None
+    if args.extend_csv:
+        ext_qc = {"input_file": args.extend_csv, "elevation_fixes": [],
+                  "warnings": []}
+        ext_points = read_points(os.path.join(args.input, args.extend_csv),
+                                 ext_qc["elevation_fixes"], ext_qc["warnings"],
+                                 z_band)
+        ext_qc["input_rows"] = len(ext_points)
+        if not ext_points:
+            raise SystemExit(f"extension input has no data rows: {args.extend_csv}")
+        ext_nos = [p["no"] for p in ext_points]
+        if len(set(ext_nos)) != len(ext_nos):
+            raise SystemExit("duplicate point numbers in extension input")
+        ext_qc["projection_selftest_m"] = round(
+            projection_selftest(ext_points, args.utm_zone, northern), 6)
+        if ext_qc["projection_selftest_m"] > 0.01:
+            raise SystemExit("extension projection self-test failed: "
+                             f"{ext_qc['projection_selftest_m']} m")
+        if args.extend_check_csv:
+            # keyed by the file's own numbering — must run before the renumber
+            ext_qc["check"] = datum_check(ext_points, args.input,
+                                          args.extend_check_csv,
+                                          args.check_offset, z_band)
+        head = head + merge_extension_points(points, ext_points, ext_qc,
+                                             ext_qc["warnings"])
+        qc["extension"] = ext_qc
+
     sections, strays = build_section_stream(head, args, qc)
     orient_sections(sections, args.gap, qc)
     qc["sections"] = len(sections)
@@ -1009,9 +1146,10 @@ def main():
 
     section_points = sum(len(s["ordered"]) for s in sections)
     total = section_points + longi["points"] + len(strays)
-    qc["invariant"] = {"sum": total, "ok": total == qc["input_rows"]}
+    expected = qc["input_rows"] + (ext_qc["kept_rows"] if ext_qc else 0)
+    qc["invariant"] = {"sum": total, "expected": expected, "ok": total == expected}
     if not qc["invariant"]["ok"]:
-        raise SystemExit(f"POINT ACCOUNTING FAILED: {total} != {qc['input_rows']}")
+        raise SystemExit(f"POINT ACCOUNTING FAILED: {total} != {expected}")
 
     # multibeam stream (optional): same machinery, separate accounting.
     # No longitudinal-tail detection — trailing spot points become
@@ -1062,6 +1200,10 @@ def main():
           f"{longi['points']} longitudinal, {len(strays)} strays, "
           f"{len(qc['elevation_fixes'])} elevation fixes"
           + (f", {joined_n} collinear joins" if joined_n else ""))
+    if ext_qc:
+        print(f"OK extension: {ext_qc['input_rows']} rows, "
+              f"{ext_qc['duplicates_dropped']} re-delivered duplicates dropped, "
+              f"{ext_qc['kept_rows']} new points folded into the main stream")
     if mb_qc:
         print(f"OK multibeam: {mb_qc['sections']} sections, "
               f"{sum(len(s['ordered']) for s in mb_sections)} section points, "

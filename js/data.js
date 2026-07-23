@@ -15,7 +15,9 @@ function getJSON(url) {
 // is rewritten in place when datasets change, so fetch it fresh every load;
 // per-dataset files are keyed to the dataset's `updated` stamp from the index,
 // so a rebuild changes their URLs and needs no manual purge.
-const bust = (u) => (u ? `?u=${encodeURIComponent(u)}` : '');
+// exported: download hrefs (CSV/ZIP) need the same buster — Cloudflare
+// caches them by default and their content changes on data re-deliveries
+export const bust = (u) => (u ? `?u=${encodeURIComponent(u)}` : '');
 
 export const loadIndex = () => getJSON(`datasets/datasets.json?t=${Date.now()}`);
 export const loadManifest = (path, u) => getJSON(`${path}/manifest.json${bust(u)}`);

@@ -15,6 +15,10 @@
 # - Each site also has a multibeam CSV pair (dam-site bathymetry filling the
 #   reach the main survey skips); it is processed as a second section stream
 #   with ids XMU-n and its own accounting.
+# - Extension_X82-X92_{MSL,HONDAU}.xlsx (delivered 2026-07-23) re-deliver
+#   sections X-82..X-92 extended landward to ~196 m; --extend-csv drops the
+#   re-delivered duplicate points and folds the new ground into the same
+#   sections (ids stay stable).
 # - After every run, check datasets/<id>/qc_report.txt: the point-accounting
 #   INVARIANT lines (one main + one multibeam per dataset) must end "True".
 set -euo pipefail
@@ -24,6 +28,8 @@ rm -rf datasets/pakchom/sections datasets/pakchom/csv
 python3 tools/process.py \
   --input "Data/4_Cross section_Pakchom" --csv "Cross Section_MSL.csv" \
   --check-csv "Cross Section_Hondau.csv" --check-offset 0.14 \
+  --extend-csv "Extension_X82-X92_MSL.xlsx" \
+  --extend-check-csv "Extension_X82-X92_HONDAU.xlsx" \
   --multibeam-csv "Section_multibeam-pakchom_MSL.csv" \
   --multibeam-check-csv "Section_multibeam-pakchom_HONDAU.csv" \
   --dataset-id pakchom --name "ປາກຊົມ (ແມ່ນ້ຳຂອງ, MSL)" \
@@ -33,6 +39,8 @@ rm -rf datasets/pakchom-hondau/sections datasets/pakchom-hondau/csv
 python3 tools/process.py \
   --input "Data/4_Cross section_Pakchom" --csv "Cross Section_Hondau.csv" \
   --check-csv "Cross Section_MSL.csv" --check-offset -0.14 \
+  --extend-csv "Extension_X82-X92_HONDAU.xlsx" \
+  --extend-check-csv "Extension_X82-X92_MSL.xlsx" \
   --multibeam-csv "Section_multibeam-pakchom_HONDAU.csv" \
   --multibeam-check-csv "Section_multibeam-pakchom_MSL.csv" \
   --dataset-id pakchom-hondau --name "ປາກຊົມ (ແມ່ນ້ຳຂອງ, Hondau)" --datum Hondau \
